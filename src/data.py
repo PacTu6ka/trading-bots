@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -29,16 +30,87 @@ INTERVAL_MAX_AGE = {
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
+DEFAULT_MARKET_DATA_MAX_BARS = 600
+_MEMORY_CACHE: dict[tuple[str, str], pd.DataFrame] = {}
+
 # BTC lot size on ArenaGo
 LOT_SIZES = {"BTC": 1}
+
+# ArenaGo BTC quantity is a small BTC contract, while market data close is BTCUSDT.
+# Based on live fills, 1 BTC lot is approximately 0.001 BTC converted to RUB.
+RUB_VALUE_MULTIPLIERS = {"BTC": 0.071}
 
 
 def get_lot_size(ticker: str) -> int:
     return LOT_SIZES.get(ticker.upper(), 1)
 
 
+def estimate_order_value_rub(ticker: str, price: float, quantity: int) -> float:
+    """Estimate ArenaGo order value in RUB for market-data price and lot quantity."""
+    multiplier = RUB_VALUE_MULTIPLIERS.get(ticker.upper(), 1.0)
+    return price * quantity * multiplier
+
+
+def estimate_quantity_for_budget(ticker: str, price: float, budget_rub: float) -> int:
+    """Estimate ArenaGo lot quantity that fits a RUB budget."""
+    lot_size = get_lot_size(ticker)
+    multiplier = RUB_VALUE_MULTIPLIERS.get(ticker.upper(), 1.0)
+    unit_value = price * multiplier * lot_size
+    if price <= 0 or budget_rub <= 0 or unit_value <= 0:
+        return 0
+    qty = int(budget_rub // unit_value) * lot_size
+    return max(qty, 0)
+
+
 # Minimum bars needed for indicators (bb_length=40 + rsi_length=14 + margin)
 MIN_BARS_FOR_STRATEGY = 60
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an integer, using %s", name, raw, default)
+        return default
+    return max(value, 1)
+
+
+def _max_bars_limit(min_bars: int = MIN_BARS_FOR_STRATEGY, max_bars: int | None = None) -> int:
+    configured = max_bars if max_bars is not None else _env_int(
+        "MARKET_DATA_MAX_BARS",
+        DEFAULT_MARKET_DATA_MAX_BARS,
+    )
+    return max(configured, min_bars)
+
+
+def _trim_bars(df: pd.DataFrame, min_bars: int = MIN_BARS_FOR_STRATEGY, max_bars: int | None = None) -> pd.DataFrame:
+    if df.empty:
+        return df
+    limit = _max_bars_limit(min_bars=min_bars, max_bars=max_bars)
+    if len(df) <= limit:
+        return df
+    return df.tail(limit)
+
+
+def _is_fresh_dataframe(
+    df: pd.DataFrame,
+    min_bars: int = MIN_BARS_FOR_STRATEGY,
+    interval: str = "1h",
+) -> bool:
+    if df.empty or len(df) < min_bars:
+        return False
+    try:
+        last_ts = pd.Timestamp(df.index[-1])
+        if last_ts.tzinfo is not None:
+            last_ts = last_ts.tz_convert(None)
+        max_age = INTERVAL_MAX_AGE.get(interval, timedelta(hours=2))
+        age = pd.Timestamp.utcnow().tz_localize(None) - last_ts
+        return age <= max_age
+    except Exception:
+        return False
 
 
 def _validate_cache(
@@ -79,12 +151,15 @@ def get_candles(
     interval: str = "1h",
     months_back: int = 6,
     force_refresh: bool = False,
+    max_bars: int | None = None,
 ) -> pd.DataFrame:
     cache_path = DATA_DIR / f"{ticker}_{interval}.parquet"
 
     if not force_refresh and _validate_cache(cache_path, interval=interval):
         df = pd.read_parquet(cache_path)
         logger.debug(f"Loaded {ticker} from cache: {len(df)} candles")
+        df = _trim_bars(df, max_bars=max_bars)
+        _MEMORY_CACHE[(ticker.upper(), interval)] = df
         return df
 
     # Delete stale cache if it exists
@@ -97,6 +172,9 @@ def get_candles(
     if not df.empty:
         df.to_parquet(cache_path)
         logger.info(f"Saved {ticker}: {len(df)} candles -> {cache_path}")
+    df = _trim_bars(df, max_bars=max_bars)
+    if not df.empty:
+        _MEMORY_CACHE[(ticker.upper(), interval)] = df
     return df
 
 
@@ -105,15 +183,25 @@ async def get_candles_async(
     interval: str = "1h",
     months_back: int = 6,
     force_refresh: bool = False,
+    min_bars: int = MIN_BARS_FOR_STRATEGY,
+    max_bars: int | None = None,
 ) -> pd.DataFrame:
     cache_path = DATA_DIR / f"{ticker}_{interval}.parquet"
+    cache_key = (ticker.upper(), interval)
 
-    if not force_refresh and _validate_cache(cache_path, interval=interval):
+    if not force_refresh:
+        cached = _MEMORY_CACHE.get(cache_key)
+        if cached is not None and _is_fresh_dataframe(cached, min_bars=min_bars, interval=interval):
+            return cached.copy(deep=False)
+
+    if not force_refresh and _validate_cache(cache_path, min_bars=min_bars, interval=interval):
         df = pd.read_parquet(cache_path)
-        return df
+        df = _trim_bars(df, min_bars=min_bars, max_bars=max_bars)
+        _MEMORY_CACHE[cache_key] = df
+        return df.copy(deep=False)
 
     # Delete stale cache if it exists
-    if cache_path.exists() and not _validate_cache(cache_path, interval=interval):
+    if cache_path.exists() and not _validate_cache(cache_path, min_bars=min_bars, interval=interval):
         cache_path.unlink(missing_ok=True)
         logger.info(f"Deleted stale cache: {cache_path}")
 
@@ -121,7 +209,9 @@ async def get_candles_async(
 
     if not df.empty:
         df.to_parquet(cache_path)
-    return df
+        df = _trim_bars(df, min_bars=min_bars, max_bars=max_bars)
+        _MEMORY_CACHE[cache_key] = df
+    return df.copy(deep=False)
 
 
 # ── Bybit V5 API ──────────────────────────────────────────────────────────────

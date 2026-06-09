@@ -44,8 +44,8 @@ def main() -> None:
     parser.add_argument("--token", default="")
     parser.add_argument("--poll", type=int, default=60,
                         help="Poll interval in seconds (default: 60)")
-    parser.add_argument("--cash-usage", type=float, default=0.20,
-                        help="Fraction of cash to use per entry, 0..1 (default: 0.20)")
+    parser.add_argument("--cash-usage", type=float, default=0.99,
+                        help="Fraction of cash to use per entry, 0..1 (default: 0.99)")
     parser.add_argument("--stop-loss", type=float, default=0.02,
                         help="Stop-loss fraction (default: 0.02)")
     parser.add_argument("--take-profit", type=float, default=0.03,

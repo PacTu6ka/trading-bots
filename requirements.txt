@@ -4,3 +4,5 @@ aiomoex>=2.0
 aiohttp
 requests
 pyarrow
+
+# Telegram polling uses aiohttp directly to keep RAM usage lower.
