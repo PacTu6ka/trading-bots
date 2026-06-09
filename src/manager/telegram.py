@@ -75,6 +75,7 @@ class TelegramController:
     async def _handle_update(self, session: Any, update: dict) -> None:
         message = update.get("message") or {}
         text = str(message.get("text") or "").strip()
+        text = self._normalize_button_text(text)
         if not text.startswith("/"):
             return
         chat = message.get("chat") or {}
@@ -134,6 +135,26 @@ class TelegramController:
         return command, rest.strip()
 
     @staticmethod
+    def _normalize_button_text(text: str) -> str:
+        button_commands = {
+            "Start": "/start",
+            "Status": "/status",
+            "Bots": "/bots",
+            "Balance": "/balance",
+            "Positions": "/positions",
+            "Trades": "/trades",
+            "Pause all": "/pause all",
+            "Resume all": "/resume all",
+        }
+        if text in button_commands:
+            return button_commands[text]
+        if text.startswith("Pause "):
+            return "/pause " + text.removeprefix("Pause ").strip()
+        if text.startswith("Resume "):
+            return "/resume " + text.removeprefix("Resume ").strip()
+        return text
+
+    @staticmethod
     def _help_text() -> str:
         return "\n".join(
             [
@@ -155,6 +176,7 @@ class TelegramController:
             "chat_id": chat_id,
             "text": self._truncate(text),
             "disable_web_page_preview": True,
+            "reply_markup": self._reply_keyboard(),
         }
         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             data = await resp.json()
@@ -169,6 +191,23 @@ class TelegramController:
         if len(text) <= limit:
             return text
         return text[: limit - 20] + "\n...truncated..."
+
+    def _reply_keyboard(self) -> dict:
+        rows = [
+            [{"text": "Status"}, {"text": "Bots"}],
+            [{"text": "Balance"}, {"text": "Positions"}],
+            [{"text": "Trades"}],
+            [{"text": "Pause all"}, {"text": "Resume all"}],
+        ]
+        bot_names = list(getattr(self.manager, "bots", {}).keys())
+        for name in bot_names:
+            rows.append([{"text": f"Pause {name}"}, {"text": f"Resume {name}"}])
+        return {
+            "keyboard": rows,
+            "resize_keyboard": True,
+            "one_time_keyboard": False,
+            "is_persistent": True,
+        }
 
 
 def _aiohttp():

@@ -85,6 +85,8 @@ ENABLED_BOTS=btc_bollinger,btc_trend
 
 ## Telegram Commands
 
+The bot shows a persistent Telegram keyboard with the same actions, so commands do not have to be typed manually.
+
 - `/start`
 - `/status`
 - `/bots`
