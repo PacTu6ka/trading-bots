@@ -205,7 +205,7 @@ class BotManager:
                 token=self.config.arena_token,
                 bot_name=bot_config.portfolio,
                 ticker=bot_config.ticker,
-                daily_loss_limit=bot_config.daily_loss_limit,
+                daily_loss_limit_rub=bot_config.daily_loss_limit_rub,
                 max_bars=self.config.market_data_max_bars,
                 event_sink=event_sink,
             )

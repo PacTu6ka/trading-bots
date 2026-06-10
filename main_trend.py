@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from src.live.trend_runner import create_btc_trend_trader
+from src.live.trend_runner import DEFAULT_DAILY_LOSS_LIMIT_RUB, create_btc_trend_trader
 
 
 def load_env_token() -> str:
@@ -50,7 +50,7 @@ def main() -> None:
     parser.add_argument("--token", default="")
     parser.add_argument("--bot-name", default="btc trend")
     parser.add_argument("--poll", type=int, default=60)
-    parser.add_argument("--daily-loss-limit", type=float, default=0.07)
+    parser.add_argument("--daily-loss-limit-rub", type=float, default=DEFAULT_DAILY_LOSS_LIMIT_RUB)
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -62,14 +62,14 @@ def main() -> None:
         logger.error("ArenaGo token is missing. Set ARENA_TOKEN in .env or pass --token.")
         return
 
-    if not 0 < args.daily_loss_limit < 1:
-        logger.error("--daily-loss-limit must be a fraction between 0 and 1")
+    if args.daily_loss_limit_rub <= 0:
+        logger.error("--daily-loss-limit-rub must be greater than 0")
         return
 
     trader = create_btc_trend_trader(
         token=token,
         bot_name=args.bot_name,
-        daily_loss_limit=args.daily_loss_limit,
+        daily_loss_limit_rub=args.daily_loss_limit_rub,
     )
 
     if args.mode == "status":
@@ -78,7 +78,7 @@ def main() -> None:
 
     logger.info("Starting BTC Trend Divergence Bot")
     logger.info(f"ArenaGo portfolio: {args.bot_name!r}")
-    logger.info(f"Daily loss limit: {args.daily_loss_limit:.1%}")
+    logger.info(f"Daily loss limit: {args.daily_loss_limit_rub:,.2f} RUB")
     logger.info(f"Profiles: {trader.describe_profiles()}")
 
     try:

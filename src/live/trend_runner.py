@@ -20,6 +20,8 @@ STATE_DIR.mkdir(exist_ok=True)
 TRADES_DIR = Path(__file__).resolve().parent.parent.parent / "trades"
 TRADES_DIR.mkdir(exist_ok=True)
 
+DEFAULT_DAILY_LOSS_LIMIT_RUB = 70_000.0
+
 
 @dataclass(frozen=True)
 class TradeProfile:
@@ -46,14 +48,14 @@ class BtcTrendTrader:
         token: str,
         bot_name: str = "btc trend",
         ticker: str = "BTC",
-        daily_loss_limit: float = 0.07,
+        daily_loss_limit_rub: float = DEFAULT_DAILY_LOSS_LIMIT_RUB,
         profiles: list[TradeProfile] | None = None,
         max_bars: int | None = None,
         event_sink: Callable[[str, dict], None] | None = None,
     ):
         self.ticker = ticker.upper()
         self.bot_name = bot_name
-        self.daily_loss_limit = daily_loss_limit
+        self.daily_loss_limit_rub = daily_loss_limit_rub
         self.profiles = profiles or DEFAULT_PROFILES
         self.max_bars = max_bars
         self.event_sink = event_sink
@@ -103,7 +105,7 @@ class BtcTrendTrader:
                 "DAILY_LOSS_LIMIT",
                 {
                     "market_price": current_price,
-                    "daily_loss_limit": self.daily_loss_limit,
+                    "daily_loss_limit_rub": self.daily_loss_limit_rub,
                     "state": self.state,
                 },
             )
@@ -300,9 +302,13 @@ class BtcTrendTrader:
         if start_equity <= 0:
             return False
         equity = self._equity(current_price)
-        drawdown = (equity - start_equity) / start_equity
-        logger.info(f"Daily equity={equity:,.2f}, PnL={drawdown:.2%}")
-        return drawdown <= -self.daily_loss_limit
+        daily_pnl = equity - start_equity
+        drawdown = daily_pnl / start_equity
+        logger.info(
+            f"Daily equity={equity:,.2f}, "
+            f"PnL={daily_pnl:,.2f} RUB ({drawdown:.2%})"
+        )
+        return daily_pnl <= -self.daily_loss_limit_rub
 
     def _equity(self, current_price: float) -> float:
         cash = self.broker.get_cash_balance(self.bot_name)
@@ -310,7 +316,17 @@ class BtcTrendTrader:
         pos = positions.get(self.ticker)
         if not pos:
             return cash
-        return cash + estimate_order_value_rub(self.ticker, current_price, pos.quantity)
+        quantity = pos.quantity * get_lot_size(self.ticker)
+        if quantity > 0:
+            position_equity = estimate_order_value_rub(self.ticker, current_price, quantity)
+        else:
+            # ArenaGo cash does not add short sale proceeds; mark shorts by unrealized PnL.
+            position_equity = estimate_order_value_rub(
+                self.ticker,
+                pos.avg_price - current_price,
+                abs(quantity),
+            )
+        return cash + position_equity
 
     def _best_price(self, signals: list[tuple[TradeProfile, FrameSignal]]) -> float:
         for profile_name in ("SMALL_M5", "MEDIUM_H1", "BIG_D1"):
@@ -346,7 +362,7 @@ class BtcTrendTrader:
             "strategy": "trend_divergence",
             "active_profile": active_exit.get("profile", "-"),
             "trading_disabled": bool(self.state.get("trading_disabled", False)),
-            "daily_loss_limit": self.daily_loss_limit,
+            "daily_loss_limit_rub": self.daily_loss_limit_rub,
             "profiles": [profile.name for profile in self.profiles],
         }
 
@@ -391,7 +407,7 @@ def create_btc_trend_trader(
     token: str,
     bot_name: str = "btc trend",
     ticker: str = "BTC",
-    daily_loss_limit: float = 0.07,
+    daily_loss_limit_rub: float = DEFAULT_DAILY_LOSS_LIMIT_RUB,
     max_bars: int | None = None,
     event_sink: Callable[[str, dict], None] | None = None,
 ) -> BtcTrendTrader:
@@ -401,7 +417,7 @@ def create_btc_trend_trader(
         token=token,
         bot_name=bot_name,
         ticker=ticker,
-        daily_loss_limit=daily_loss_limit,
+        daily_loss_limit_rub=daily_loss_limit_rub,
         max_bars=max_bars,
         event_sink=event_sink,
     )

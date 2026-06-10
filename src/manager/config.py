@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_TREND_DAILY_LOSS_LIMIT_RUB = 70_000.0
 
 
 @dataclass(frozen=True)
@@ -40,7 +41,7 @@ class BotConfig:
     cash_usage: float = 0.99
     stop_loss_pct: float = 0.02
     take_profit_pct: float = 0.03
-    daily_loss_limit: float = 0.07
+    daily_loss_limit_rub: float = DEFAULT_TREND_DAILY_LOSS_LIMIT_RUB
 
 
 @dataclass(frozen=True)
@@ -155,7 +156,10 @@ def _default_bots() -> list[BotConfig]:
             ticker=os.environ.get("BTC_TREND_TICKER", "BTC").upper(),
             portfolio=os.environ.get("BTC_TREND_PORTFOLIO", "btc trend"),
             poll_interval=_env_int("BTC_TREND_POLL", _env_int("BOT_POLL_INTERVAL", 60)),
-            daily_loss_limit=_env_float("BTC_TREND_DAILY_LOSS_LIMIT", 0.07),
+            daily_loss_limit_rub=_env_float(
+                "BTC_TREND_DAILY_LOSS_LIMIT_RUB",
+                DEFAULT_TREND_DAILY_LOSS_LIMIT_RUB,
+            ),
         ),
     ]
 
@@ -171,7 +175,7 @@ def _replace_enabled(bot: BotConfig, enabled: bool) -> BotConfig:
         cash_usage=bot.cash_usage,
         stop_loss_pct=bot.stop_loss_pct,
         take_profit_pct=bot.take_profit_pct,
-        daily_loss_limit=bot.daily_loss_limit,
+        daily_loss_limit_rub=bot.daily_loss_limit_rub,
     )
 
 
