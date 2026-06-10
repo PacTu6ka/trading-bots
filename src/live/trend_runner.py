@@ -36,9 +36,9 @@ class TradeProfile:
 
 
 DEFAULT_PROFILES = [
-    TradeProfile("BIG_D1", "1d", 18, 240, 6, 0.80, 0.05, 0.03),
-    TradeProfile("MEDIUM_H1", "1h", 6, 240, 5, 0.40, 0.03, 0.02),
-    TradeProfile("SMALL_M5", "5min", 1, 240, 4, 0.15, 0.015, 0.008),
+    TradeProfile("BIG_D1", "1d", 18, 240, 6, 0.80, 0.025, 0.015),
+    TradeProfile("MEDIUM_H1", "1h", 6, 240, 5, 0.40, 0.015, 0.01),
+    TradeProfile("SMALL_M5", "5min", 1, 240, 4, 0.15, 0.0075, 0.004),
 ]
 
 
