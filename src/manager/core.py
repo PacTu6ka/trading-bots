@@ -141,10 +141,10 @@ class BotManager:
         return "\n".join(lines)
 
     async def positions_text(self) -> str:
-        broker = self._broker()
         lines = ["Positions:"]
         any_position = False
         for bot in self.bots.values():
+            broker = getattr(bot.trader, "broker", None) or self._broker()
             positions = await asyncio.to_thread(broker.get_positions, bot.config.portfolio)
             if not positions:
                 lines.append(f"  {bot.config.portfolio}: none")
@@ -152,7 +152,7 @@ class BotManager:
             any_position = True
             for ticker, pos in positions.items():
                 lines.append(
-                    f"  {bot.config.portfolio}: {ticker} {pos.quantity:+d} lots @ {pos.avg_price:.2f}"
+                    f"  {bot.config.portfolio}: {ticker} {pos.quantity:+d} units @ {pos.avg_price:.2f}"
                 )
         if not any_position and len(lines) == 1:
             lines.append("  none")
@@ -207,6 +207,31 @@ class BotManager:
                 ticker=bot_config.ticker,
                 daily_loss_limit_rub=bot_config.daily_loss_limit_rub,
                 max_bars=self.config.market_data_max_bars,
+                event_sink=event_sink,
+            )
+        elif bot_config.strategy == "moex_portfolio":
+            from src.moex.runner import create_moex_portfolio_trader
+
+            trader = create_moex_portfolio_trader(
+                token=self.config.arena_token,
+                bot_name=bot_config.portfolio,
+                fixed_position_rub=bot_config.position_rub,
+                stop_loss_pct=bot_config.stop_loss_pct,
+                take_profit_pct=bot_config.take_profit_pct,
+                max_bars=bot_config.max_bars or self.config.market_data_max_bars,
+                event_sink=event_sink,
+            )
+        elif bot_config.strategy == "moex_intraday":
+            from src.moex.runner import create_moex_intraday_trader
+
+            trader = create_moex_intraday_trader(
+                token=self.config.arena_token,
+                bot_name=bot_config.portfolio,
+                fixed_position_rub=bot_config.position_rub,
+                stop_loss_pct=bot_config.stop_loss_pct,
+                take_profit_pct=bot_config.take_profit_pct,
+                max_bars=bot_config.max_bars or 1200,
+                max_open_positions=bot_config.max_open_positions or 5,
                 event_sink=event_sink,
             )
         else:
@@ -289,7 +314,18 @@ class BotManager:
     @staticmethod
     def _format_snapshot(snapshot: dict) -> str:
         items = []
-        for key in ("position", "quantity", "entry_price", "active_profile", "trading_disabled"):
+        for key in (
+            "position",
+            "quantity",
+            "entry_price",
+            "active_profile",
+            "trading_disabled",
+            "interval",
+            "watched",
+            "open_positions",
+            "last_bar_time",
+            "max_bars",
+        ):
             if key in snapshot:
                 items.append(f"{key}={snapshot[key]}")
         return "  " + ", ".join(items) if items else "  snapshot available"

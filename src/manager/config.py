@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -42,6 +42,10 @@ class BotConfig:
     stop_loss_pct: float = 0.02
     take_profit_pct: float = 0.03
     daily_loss_limit_rub: float = DEFAULT_TREND_DAILY_LOSS_LIMIT_RUB
+    interval: str = "1h"
+    position_rub: float = 0.0
+    max_bars: int | None = None
+    max_open_positions: int | None = None
 
 
 @dataclass(frozen=True)
@@ -120,9 +124,18 @@ def config_check_lines(config: ManagerConfig) -> list[str]:
         f"  Enabled bots: {', '.join(bot.name for bot in config.enabled_bots) or 'none'}",
     ]
     for bot in config.bots:
+        extras = [
+            f"interval={bot.interval}",
+            f"max_bars={bot.max_bars or config.market_data_max_bars}",
+        ]
+        if bot.position_rub:
+            extras.append(f"position_rub={bot.position_rub:,.0f}")
+        if bot.max_open_positions is not None:
+            extras.append(f"max_open={bot.max_open_positions}")
         lines.append(
             f"  - {bot.name}: enabled={bot.enabled}, strategy={bot.strategy}, "
-            f"portfolio={bot.portfolio!r}, poll={bot.poll_interval}s"
+            f"portfolio={bot.portfolio!r}, poll={bot.poll_interval}s, "
+            f"{', '.join(extras)}"
         )
     return lines
 
@@ -148,6 +161,7 @@ def _default_bots() -> list[BotConfig]:
             cash_usage=_env_float("BTC_BOLLINGER_CASH_USAGE", 0.99),
             stop_loss_pct=_env_float("BTC_BOLLINGER_STOP_LOSS", 0.02),
             take_profit_pct=_env_float("BTC_BOLLINGER_TAKE_PROFIT", 0.03),
+            interval="1h",
         ),
         BotConfig(
             name="btc_trend",
@@ -160,23 +174,40 @@ def _default_bots() -> list[BotConfig]:
                 "BTC_TREND_DAILY_LOSS_LIMIT_RUB",
                 DEFAULT_TREND_DAILY_LOSS_LIMIT_RUB,
             ),
+            interval="multi",
+        ),
+        BotConfig(
+            name="moex_portfolio",
+            strategy="moex_portfolio",
+            enabled=_env_bool("MOEX_PORTFOLIO_ENABLED", False),
+            ticker="MOEX_PORTFOLIO",
+            portfolio=os.environ.get("MOEX_PORTFOLIO_PORTFOLIO", "saux hak"),
+            poll_interval=_env_int("MOEX_PORTFOLIO_POLL", _env_int("BOT_POLL_INTERVAL", 60)),
+            stop_loss_pct=_env_float("MOEX_PORTFOLIO_STOP_LOSS", 0.03),
+            take_profit_pct=_env_float("MOEX_PORTFOLIO_TAKE_PROFIT", 0.025),
+            interval="1h",
+            position_rub=_env_float("MOEX_PORTFOLIO_POSITION_RUB", 200_000.0),
+            max_bars=_env_optional_int("MOEX_PORTFOLIO_MAX_BARS") or 600,
+        ),
+        BotConfig(
+            name="moex_intraday",
+            strategy="moex_intraday",
+            enabled=_env_bool("MOEX_INTRADAY_ENABLED", False),
+            ticker="MOEX_INTRADAY",
+            portfolio=os.environ.get("MOEX_INTRADAY_PORTFOLIO", "saux intraday"),
+            poll_interval=_env_int("MOEX_INTRADAY_POLL", _env_int("BOT_POLL_INTERVAL", 60)),
+            stop_loss_pct=_env_float("MOEX_INTRADAY_STOP_LOSS", 0.012),
+            take_profit_pct=_env_float("MOEX_INTRADAY_TAKE_PROFIT", 0.018),
+            interval="5min",
+            position_rub=_env_float("MOEX_INTRADAY_POSITION_RUB", 200_000.0),
+            max_bars=_env_optional_int("MOEX_INTRADAY_MAX_BARS") or 1200,
+            max_open_positions=_env_optional_int("MOEX_INTRADAY_MAX_OPEN_POSITIONS") or 5,
         ),
     ]
 
 
 def _replace_enabled(bot: BotConfig, enabled: bool) -> BotConfig:
-    return BotConfig(
-        name=bot.name,
-        strategy=bot.strategy,
-        enabled=enabled,
-        ticker=bot.ticker,
-        portfolio=bot.portfolio,
-        poll_interval=bot.poll_interval,
-        cash_usage=bot.cash_usage,
-        stop_loss_pct=bot.stop_loss_pct,
-        take_profit_pct=bot.take_profit_pct,
-        daily_loss_limit_rub=bot.daily_loss_limit_rub,
-    )
+    return replace(bot, enabled=enabled)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -194,6 +225,16 @@ def _env_int(name: str, default: int) -> int:
         return max(int(raw), 1)
     except ValueError:
         return default
+
+
+def _env_optional_int(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return None
 
 
 def _env_float(name: str, default: float) -> float:
