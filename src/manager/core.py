@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from src.data import RUB_VALUE_MULTIPLIERS, estimate_order_value_rub
 from src.live.broker import ArenaGoBroker
 from src.live.runner import create_btc_trader
 from src.live.trend_runner import create_btc_trend_trader
@@ -137,7 +138,21 @@ class BotManager:
             return "Balance: no ArenaGo portfolios returned"
         lines = ["Balance:"]
         for bot in bots:
-            lines.append(f"  {bot.name}: {bot.cash_balance:,.2f} RUB")
+            portfolio_broker = self._broker_for_portfolio(bot.name)
+            try:
+                positions = await asyncio.to_thread(portfolio_broker.get_positions, bot.name)
+                positions_value = self._positions_value(portfolio_broker, positions)
+                total = bot.cash_balance + positions_value
+                lines.append(
+                    f"  {bot.name}: total≈{total:,.2f} RUB, "
+                    f"cash={bot.cash_balance:,.2f} RUB, "
+                    f"positions≈{positions_value:,.2f} RUB ({len(positions)} open)"
+                )
+            except Exception as e:
+                lines.append(
+                    f"  {bot.name}: cash={bot.cash_balance:,.2f} RUB, "
+                    f"positions unavailable ({e})"
+                )
         return "\n".join(lines)
 
     async def positions_text(self) -> str:
@@ -300,6 +315,38 @@ class BotManager:
             return first.trader.broker
         first_config = self.config.bots[0]
         return ArenaGoBroker(self.config.arena_token, bot_name=first_config.portfolio)
+
+    def _broker_for_portfolio(self, portfolio: str) -> ArenaGoBroker:
+        for bot in self.bots.values():
+            if bot.config.portfolio == portfolio:
+                return getattr(bot.trader, "broker", None) or self._broker()
+        return self._broker()
+
+    @classmethod
+    def _positions_value(cls, broker: object, positions: dict) -> float:
+        return sum(
+            cls._position_value(broker, ticker, position)
+            for ticker, position in positions.items()
+        )
+
+    @staticmethod
+    def _position_value(broker: object, ticker: str, position: object) -> float:
+        quantity = abs(float(getattr(position, "quantity", 0) or 0))
+        if quantity <= 0:
+            return 0.0
+
+        price = float(getattr(position, "current_price", 0) or 0)
+        if price <= 0:
+            prices = getattr(broker, "_prices", {}) or {}
+            price = float(prices.get(ticker.upper(), 0) or 0)
+        if price <= 0:
+            price = float(getattr(position, "avg_price", 0) or 0)
+        if price <= 0:
+            return 0.0
+
+        if ticker.upper() in RUB_VALUE_MULTIPLIERS:
+            return estimate_order_value_rub(ticker, price, int(quantity))
+        return quantity * price
 
     def _snapshot(self, bot: ManagedBot) -> dict:
         snapshot = getattr(bot.trader, "status_snapshot", None)

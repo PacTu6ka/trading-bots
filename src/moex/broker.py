@@ -65,6 +65,7 @@ class Position:
     api_quantity: int = 0
     avg_price: float = 0.0
     unrealized_pnl: float = 0.0
+    current_price: float = 0.0
 
 
 @dataclass
@@ -180,9 +181,16 @@ class ArenaGoBroker:
                 continue
             avg_price = float(item.get("average_price", item.get("avg_price", 0)))
             qty_shares = self._api_to_shares(ticker, api_qty)
-            price = self._prices.get(ticker, avg_price)
+            api_price = float(
+                item.get(
+                    "current_price",
+                    item.get("market_price", item.get("last_price", item.get("price", 0))),
+                )
+                or 0
+            )
+            price = api_price or self._prices.get(ticker, avg_price)
             pnl = (price - avg_price) * qty_shares
-            result[ticker] = Position(ticker, qty_shares, api_qty, avg_price, pnl)
+            result[ticker] = Position(ticker, qty_shares, api_qty, avg_price, pnl, price)
 
         if bot_name == self.bot_name:
             self._positions_cache = result
@@ -224,4 +232,3 @@ class ArenaGoBroker:
             f"ArenaGo [{self.bot_name}] cash={self.get_cash_balance():,.0f} RUB "
             f"positions={len(positions)} pos_value={pos_value:,.0f} RUB"
         )
-

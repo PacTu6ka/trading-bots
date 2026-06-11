@@ -19,6 +19,7 @@ BASE_URL = "https://arenago.ru/api"
 class Position:
     quantity: int
     avg_price: float
+    current_price: float = 0.0
 
 
 @dataclass
@@ -151,6 +152,13 @@ class ArenaGoBroker:
             positions[secid] = Position(
                 quantity=int(pos.get("position", pos.get("quantity", 0))),
                 avg_price=float(pos.get("average_price", pos.get("avg_price", 0))),
+                current_price=float(
+                    pos.get(
+                        "current_price",
+                        pos.get("market_price", pos.get("last_price", pos.get("price", 0))),
+                    )
+                    or 0
+                ),
             )
         return positions
 
