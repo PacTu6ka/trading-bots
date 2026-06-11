@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import aiohttp
@@ -193,7 +193,7 @@ async def _fetch_moex(ticker: str, interval: str, months_back: int) -> pd.DataFr
 
     iss_interval = INTERVAL_MAP[interval]
     end = datetime.now()
-    start = end - timedelta(days=30 * months_back)
+    start = (pd.Timestamp(end).normalize() - pd.DateOffset(months=months_back)).to_pydatetime()
 
     async with aiohttp.ClientSession() as session:
         try:
@@ -220,4 +220,3 @@ async def _fetch_moex(ticker: str, interval: str, months_back: int) -> pd.DataFr
     keep_cols = ["open", "high", "low", "close", "volume", "value"]
     df = df[[col for col in keep_cols if col in df.columns]]
     return df[~df.index.duplicated(keep="last")]
-

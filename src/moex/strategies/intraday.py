@@ -26,6 +26,16 @@ def _minutes(index: pd.DatetimeIndex) -> np.ndarray:
     return (index.hour * 60 + index.minute).to_numpy()
 
 
+def _bool_param(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def _session_vwap(df: pd.DataFrame) -> pd.Series:
     typical = (df["high"] + df["low"] + df["close"]) / 3.0
     volume = df["volume"].replace(0, np.nan)
@@ -95,37 +105,172 @@ class IntradayStrategy(Strategy):
 
         kind = self.params.get("kind", "vwap_atr_reversion")
         raw = getattr(self, f"_signal_{kind}", self._signal_vwap_atr_reversion)(df)
-        return self._apply_session_rules(raw)
+        return self._apply_session_rules(raw, df)
 
-    def _apply_session_rules(self, raw: pd.Series) -> pd.Series:
+    def _apply_session_rules(self, raw: pd.Series, df: pd.DataFrame | None = None) -> pd.Series:
         start_min = _clock_to_min(self.params.get("session_start", "06:55"))
         no_entry_min = _clock_to_min(self.params.get("no_entry_after", "23:20"))
         flat_min = _clock_to_min(self.params.get("force_flat_at", "23:25"))
         minutes = _minutes(raw.index)
+        max_trades_per_day = int(self.params.get("max_trades_per_day", 10_000))
+        cooldown_bars = int(self.params.get("cooldown_bars", 0))
+        max_signal_age = int(self.params.get("entry_signal_max_age_bars", 10_000))
+        allow_reversal = _bool_param(self.params.get("allow_reversal"), default=False)
+        long_allowed, short_allowed = self._entry_filter_masks(raw.index, df)
+        dates = raw.index.normalize()
+        signal_age = self._signal_age(raw, dates)
 
         out = np.zeros(len(raw), dtype=int)
         pos = 0
+        entries_today = 0
+        last_exit_i = -10_000
         values = raw.fillna(0).astype(int).to_numpy()
-        dates = raw.index.normalize()
         current_date = None
+
+        def can_enter(i: int, desired: int) -> bool:
+            if entries_today >= max_trades_per_day:
+                return False
+            if i - last_exit_i < cooldown_bars:
+                return False
+            if signal_age[i] > max_signal_age:
+                return False
+            return bool(long_allowed[i] if desired > 0 else short_allowed[i])
 
         for i, desired in enumerate(values):
             if dates[i] != current_date:
                 pos = 0
+                entries_today = 0
+                last_exit_i = -10_000
                 current_date = dates[i]
 
             minute = minutes[i]
             if minute < start_min or minute >= flat_min:
+                if pos != 0:
+                    last_exit_i = i
                 pos = 0
             elif minute >= no_entry_min and pos == 0 and desired != 0:
                 pos = 0
-            elif minute >= no_entry_min and pos != 0 and desired not in (0, pos):
-                pos = 0
-            else:
+            elif desired == pos:
                 pos = desired
+            elif desired == 0:
+                if pos != 0:
+                    last_exit_i = i
+                pos = 0
+            elif minute >= no_entry_min:
+                if pos != 0 and desired != pos:
+                    last_exit_i = i
+                pos = 0
+            elif pos == 0:
+                if can_enter(i, desired):
+                    pos = desired
+                    entries_today += 1
+            elif allow_reversal and can_enter(i, desired):
+                pos = desired
+                entries_today += 1
+            else:
+                last_exit_i = i
+                pos = 0
             out[i] = pos
 
         return pd.Series(out, index=raw.index, dtype=int)
+
+    def _entry_filter_masks(
+        self,
+        index: pd.DatetimeIndex,
+        df: pd.DataFrame | None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if df is None or df.empty:
+            allowed = np.ones(len(index), dtype=bool)
+            return allowed, allowed.copy()
+
+        long_allowed = pd.Series(True, index=index)
+        short_allowed = pd.Series(True, index=index)
+
+        min_volume_ratio = self.params.get("min_volume_ratio")
+        if min_volume_ratio is not None and "volume" in df:
+            volume_window = int(self.params.get("volume_window", 20))
+            volume_avg = df["volume"].rolling(volume_window).mean()
+            volume_ok = df["volume"] >= volume_avg * float(min_volume_ratio)
+            long_allowed &= volume_ok.fillna(False)
+            short_allowed &= volume_ok.fillna(False)
+
+        min_value = self.params.get("min_value")
+        if min_value is not None:
+            if "value" in df:
+                value = df["value"]
+            else:
+                value = df["close"] * df.get("volume", 0)
+            value_ok = value >= float(min_value)
+            long_allowed &= value_ok.fillna(False)
+            short_allowed &= value_ok.fillna(False)
+
+        atr_pct = None
+        if self.params.get("atr_pct_min") is not None or self.params.get("atr_pct_max") is not None:
+            atr_pct = atr(
+                df["high"],
+                df["low"],
+                df["close"],
+                int(self.params.get("atr_length", 14)),
+            ) / df["close"].replace(0, np.nan)
+
+        atr_pct_min = self.params.get("atr_pct_min")
+        if atr_pct_min is not None and atr_pct is not None:
+            atr_ok = atr_pct >= float(atr_pct_min)
+            long_allowed &= atr_ok.fillna(False)
+            short_allowed &= atr_ok.fillna(False)
+
+        atr_pct_max = self.params.get("atr_pct_max")
+        if atr_pct_max is not None and atr_pct is not None:
+            atr_ok = atr_pct <= float(atr_pct_max)
+            long_allowed &= atr_ok.fillna(False)
+            short_allowed &= atr_ok.fillna(False)
+
+        if _bool_param(self.params.get("use_trend_filter"), default=False):
+            trend_fast, trend_slow = self._trend_lines(df)
+            long_allowed &= (trend_fast > trend_slow).fillna(False)
+            short_allowed &= (trend_fast < trend_slow).fillna(False)
+
+        return long_allowed.to_numpy(dtype=bool), short_allowed.to_numpy(dtype=bool)
+
+    def _trend_lines(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        timeframe = self.params.get("trend_timeframe", "5min")
+        fast_len = int(self.params.get("trend_fast", 20))
+        slow_len = int(self.params.get("trend_slow", 100))
+        close = df["close"].astype(float)
+
+        if timeframe and timeframe != "5min":
+            higher_close = close.resample(timeframe, label="left", closed="left").last().dropna()
+            fast = ema(higher_close, fast_len).reindex(close.index, method="ffill")
+            slow = ema(higher_close, slow_len).reindex(close.index, method="ffill")
+            return fast, slow
+
+        return ema(close, fast_len), ema(close, slow_len)
+
+    @staticmethod
+    def _signal_age(raw: pd.Series, dates: pd.DatetimeIndex) -> np.ndarray:
+        values = raw.fillna(0).astype(int).to_numpy()
+        ages = np.full(len(values), 10_000, dtype=int)
+        active = 0
+        age = 10_000
+        current_date = None
+
+        for i, desired in enumerate(values):
+            if dates[i] != current_date:
+                active = 0
+                age = 10_000
+                current_date = dates[i]
+
+            if desired == 0:
+                active = 0
+                age = 10_000
+            elif desired != active:
+                active = desired
+                age = 0
+            else:
+                age += 1
+            ages[i] = age
+
+        return ages
 
     def _signal_rsi2_reversion(self, df: pd.DataFrame) -> pd.Series:
         p = self.params
@@ -226,12 +371,84 @@ class IntradayStrategy(Strategy):
         slow = ema(df["close"], p.get("slow", 21))
         return self._state_from_entries(fast > slow, fast < slow, fast < slow, fast > slow, df.index)
 
+    def _signal_trend_vwap_reclaim(self, df: pd.DataFrame) -> pd.Series:
+        p = self.params
+        fast = ema(df["close"], p.get("fast", 20))
+        slow = ema(df["close"], p.get("slow", 100))
+        vw = _session_vwap(df)
+        rv = rsi(df["close"], p.get("rsi_length", 14))
+        long_rsi = p.get("long_rsi_min", 48)
+        short_rsi = p.get("short_rsi_max", 52)
+        return self._state_from_entries(
+            (fast > slow)
+            & (df["close"].shift(1) <= vw.shift(1))
+            & (df["close"] > vw)
+            & (df["close"] > fast)
+            & (rv >= long_rsi),
+            (fast < slow)
+            & (df["close"].shift(1) >= vw.shift(1))
+            & (df["close"] < vw)
+            & (df["close"] < fast)
+            & (rv <= short_rsi),
+            (df["close"] < vw) | (fast < slow),
+            (df["close"] > vw) | (fast > slow),
+            df.index,
+        )
+
     def _signal_supertrend(self, df: pd.DataFrame) -> pd.Series:
         return _supertrend_direction(
             df,
             self.params.get("atr_period", 7),
             self.params.get("atr_mult", 2.0),
         )
+
+    def _signal_opening_range_breakout(self, df: pd.DataFrame) -> pd.Series:
+        p = self.params
+        start_min = _clock_to_min(p.get("session_start", "06:55"))
+        range_end_min = start_min + int(p.get("opening_range_minutes", 30))
+        minutes = _minutes(df.index)
+        dates = df.index.normalize()
+        band_atr = atr(df["high"], df["low"], df["close"], p.get("atr_length", 14)).fillna(0.0)
+        atr_buffer = float(p.get("atr_buffer", 0.15))
+
+        long_entry = pd.Series(False, index=df.index)
+        short_entry = pd.Series(False, index=df.index)
+        long_exit = pd.Series(False, index=df.index)
+        short_exit = pd.Series(False, index=df.index)
+
+        for date in pd.unique(dates):
+            day_pos = np.flatnonzero(dates == date)
+            if len(day_pos) == 0:
+                continue
+
+            day_minutes = minutes[day_pos]
+            range_pos = day_pos[(day_minutes >= start_min) & (day_minutes < range_end_min)]
+            if len(range_pos) == 0:
+                continue
+
+            high = float(df["high"].iloc[range_pos].max())
+            low = float(df["low"].iloc[range_pos].min())
+            mid = (high + low) / 2.0
+            after_pos = day_pos[day_minutes >= range_end_min]
+            if len(after_pos) == 0:
+                continue
+
+            closes = df["close"].iloc[after_pos]
+            previous = df["close"].shift(1).iloc[after_pos]
+            buffer_value = atr_buffer * band_atr.iloc[after_pos]
+            if _bool_param(p.get("breakout_cross_only"), default=True):
+                long_break = (previous <= high) & (closes > high + buffer_value)
+                short_break = (previous >= low) & (closes < low - buffer_value)
+            else:
+                long_break = closes > high + buffer_value
+                short_break = closes < low - buffer_value
+
+            long_entry.iloc[after_pos] = long_break.to_numpy()
+            short_entry.iloc[after_pos] = short_break.to_numpy()
+            long_exit.iloc[after_pos] = (closes < mid).to_numpy()
+            short_exit.iloc[after_pos] = (closes > mid).to_numpy()
+
+        return self._state_from_entries(long_entry, short_entry, long_exit, short_exit, df.index)
 
     def _signal_donchian_breakout(self, df: pd.DataFrame) -> pd.Series:
         window = self.params.get("window", 20)
@@ -306,7 +523,8 @@ class IntradayStrategy(Strategy):
         return (
             f"IntradayStrategy(kind={self.params.get('kind')}) "
             f"close={float(df['close'].iloc[-1]):.2f} "
+            f"max_trades_per_day={self.params.get('max_trades_per_day', '-') } "
+            f"cooldown_bars={self.params.get('cooldown_bars', '-') } "
             f"no_entry_after={self.params.get('no_entry_after')} "
             f"force_flat_at={self.params.get('force_flat_at')}"
         )
-
